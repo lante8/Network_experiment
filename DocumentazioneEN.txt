@@ -1,0 +1,107 @@
+Experiment on Wireshark to sniff encrypted packets.
+
+Note: This experiment was done solely for personal educational purposes. I encourage anyone reading this document to try it on their own without following the steps below exactly, or to create a different experiment following the same philosophy. For the creation of the login.html and server_https.py files, I relied entirely on AI; this is not an experiment to learn programming.
+
+1)Generating the RSA key and certificate
+
+openssl req -x509 -newkey rsa:2048 -keyout nuovakey_rsa.pem \
+  -out questocert.pem -days 365 -nodes
+nuovakey_rsa.pem: RSA private key (no passphrase, for Wireshark). Important that the key is RSA.
+
+questocert.pem: self-signed certificate containing the public key.
+A self-signed certificate is sufficient for a LAN experiment, and the RSA key is used both by the server to encrypt and by Wireshark to decrypt.
+
+2)Protocol and cipher details to understand what we’re doing
+We avoid TLS 1.3 with PFS because Wireshark cannot decrypt it with only the RSA key—it would require capturing the session secrets too. PFS (Perfect Forward Secrecy) is a property that changes keys for each session using mechanisms like Diffie-Hellman (DH) or Elliptic Curve DH (ECDHE).
+
+2.1) Explaining Diffie-Hellman, Elliptic Curve DH (ECDHE), and the AES128-SHA cipher suite
+
+Diffie-Hellman (DH)
+Purpose: lets two parties generate a shared secret key over a public channel, without ever transmitting the key itself.
+
+How it works in practice:
+
+Both agree on public numbers:
+
+A large prime p
+
+A base g
+
+Alice picks secret a and computes A = gᵃ mod p.
+
+Bob picks secret b and computes B = gᵇ mod p.
+
+Alice sends A to Bob; Bob sends B to Alice.
+
+Alice computes (B)ᵃ mod p = gᵃᵇ mod p.
+Bob computes (A)ᵇ mod p = gᵃᵇ mod p.
+Both now share the secret gᵃᵇ mod p, without ever sending it directly.
+
+Classical DH often uses static keys, which do not guarantee PFS if reused—that’s why we have ECDHE.
+
+Elliptic Curve Diffie-Hellman (ECDHE)
+
+Elliptic-curve version of DH, using points on a curve instead of modular exponentiation.
+
+Faster and more secure at the same key length.
+
+“E” stands for Ephemeral: keys are generated per session ⇒ PFS enabled (which we deliberately avoid in this experiment).
+
+How it works (high-level):
+
+Server and client exchange elliptic-curve public keys.
+
+Each uses its private key to compute a common point on the curve.
+
+From that point, they derive a shared secret.
+
+In TLS, ECDHE is used (with RSA or ECC certificates) for authentication; key exchange itself is ephemeral ⇒ PFS.
+Because of PFS, even with the server’s RSA private key you cannot decrypt recorded TLS 1.3 traffic—you only negotiate ephemeral session keys.
+
+AES128-SHA
+
+AES-128: symmetric cipher used to encrypt the actual data.
+
+SHA: hash function for integrity (HMAC).
+It’s an RSA-based key-exchange suite without PFS, so Wireshark can decrypt using only the private key.
+
+3) Forcing ALPN to use HTTP/1.1
+ALPN (Application-Layer Protocol Negotiation) negotiates which protocol runs over TLS (e.g. http/1.1 vs. h2). Chrome defaults to HTTP/2 (where Wireshark doesn’t show http.request.method). Forcing HTTP/1.1 returns classic HTTP/1.1 frames.
+
+4)Start and test
+
+cd esperimentoW
+python3 server_https.py
+# Server listening on https://0.0.0.0:8443
+From another device on the same LAN, visit https://<server-IP>:8443
+Accept the self-signed certificate.
+Fill in the form with user123 / password456 (the server checks exactly these credentials).
+
+Capture traffic with Wireshark
+
+Capture filter: tcp port 8443 (optionally add ip.addr and ip.src)
+
+Import RSA key in TLS preferences:
+
+IP: 0.0.0.0 (or your server IP)
+
+Port: 8443
+
+Protocol: http (not https)
+
+Key File: path to nuovakey_rsa.pem
+
+Capture from the start: ClientHello, ServerHello, etc.
+Only then can Wireshark associate the RSA key with the session.
+
+View decrypted POST
+Once handshake and login complete, apply display filter:
+
+http.request.method == "POST"
+Wireshark will show in cleartext:
+
+POST /login HTTP/1.1
+Host: <IP>:8443
+Content-Type: application/x-www-form-urlencoded
+
+username=user123&password=password456

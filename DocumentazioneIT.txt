@@ -1,0 +1,101 @@
+Esperimento su Wireshark Per sniffare pacchetti cifrati.
+
+NB l'esperimento è stato fatto solo ed esclusivamente a scopo didattico personale. Consiglio a chiunque stia leggendo questa documentazione di riprovarlo da solo senza seguire i passaggi qui sotto elencati o magari di crearne uno diverso con la stessa filosofia :)
+
+ Per la creazione dei file login.html e server_https.py mi sono affidato totalmente alle AI, non è un esperimento per imparare a programmare ;)
+
+1) Generazione di chiave e certificato RSA
+
+openssl req -x509 -newkey rsa:2048 -keyout nuovakey_rsa.pem \
+  -out questocert.pem -days 365 -nodes
+nuovakey_rsa.pem = chiave privata RSA (no passphrase, per Wireshark). NB è importante che la chiave sia RSA.
+questocert.pem = certificato auto-firmato contenente la chiave pubblica.
+Autofirmato è sufficiente per un esperimento LAN, e la chiave RSA serviva sia al server per cifrare sia a Wireshark per decifrare.
+
+2) Specifiche ed info su protocolli e cifrature per capire meglio cosa stiamo facendo:
+
+Evitiamo TLS 1.3 con PFS che Wireshark non può decrittare con sola chiave RSA, bisognerebbe riuscire a catturare anche la sessione specifica. PFS (Perfect Forward Secrecy) è una proprietà della cifratura che cambia le chiavi per ogni sessione, usando meccanismi come Diffie-Hellman (DH) o Elliptic Curve DH (ECDHE).
+
+2.1) Spiegazione meccanismi Diffie-Hellman, Elliptic Curve DH (ECDHE), Cipher suite AES128-SHA.
+Diffie-Hellman:
+Scopo: permette a due parti di generare una chiave segreta condivisa anche se comunicano su un canale pubblico, senza mai trasmettere direttamente la chiave.
+
+Come funziona nella pratica:
+Le parti concordano su due numeri pubblici:
+Un primo grande p
+Una base g (numero generatore)
+Alice sceglie un numero segreto a e calcola A = g^a mod p
+Bob sceglie un numero segreto b e calcola B = g^b mod p
+Alice invia A a Bob; Bob invia B ad Alice
+Alice calcola: (B)^a mod p = g^(ab) mod p
+Bob calcola: (A)^b mod p = g^(ab) mod p
+
+Entrambi ora condividono la stessa chiave segreta g^(ab) mod p, senza mai averla trasmessa direttamente.
+Il DH classico spesso usa chiavi statiche, che non garantiscono PFS se riutilizzate ed ecco perchè esiste:
+Elliptic Curve Diffie-Hellman (ECDHE)
+
+-È la versione ellittica del DH: usa curve ellittiche anziché esponenti modulari.
+Vantaggi:
+-Più veloce e più sicuro a parità di lunghezza di chiave
+
+-Permette chiavi più corte, quindi meno computazione
+
+-Il prefisso "E" in ECDHE = Ephemeral (temporaneo): significa che la chiave è nuova per ogni sessione ⇒ PFS abilitato (Ed è ciò che in questo esperimento abbiamo evitato)
+
+Come funziona (alto livello):
+
+-Server e client si scambiano chiavi pubbliche di curva ellittica.
+-Usano le rispettive chiavi private per calcolare un punto comune sulla curva.
+-Da questo punto, derivano una chiave condivisa segreta.
+-In TLS, ECDHE viene usato con RSA o cert ECC solo per autenticare.
+-Lo scambio di chiavi è PFS, perché usa una chiave effimera diversa per ogni connessione.
+Questo significa che nemmeno conoscendo la chiave privata RSA del server si può decrittare il traffico registrato perché quella chiave non è direttamente usata per cifrare i dati, ma solo per negoziare delle chiavi temporanee e quindi inutili per la decrittazione.
+
+Cipher suite AES128-SHA (AES128 è la cifratura simmetrica che abbiamo usato per cifrare effettivamente i dati, mentre SHA è solamente l'hash function che usiamo per l'integrità (HMAC)  Hash-based Message Authentication Code.
+È una suite basata su RSA per lo scambio di chiavi, potrebbe comprendere al suo interno anche ECDHE, nel nostro caso l'abbiamo usata alcuna aggiunta per evitare PFS e quindi decifrabile avendo solamente la private key.
+
+Forziamo ALPN ad usare http/1.1
+ALPN (Application-Layer Protocol Negotiation) è un'estensione TLS che permette a client e server di negoziare quale protocollo usare sopra TLS, come http/1.1 o h2 (HTTP/2).
+Chrome negozia HTTP/2 via ALPN di default, in quel caso Wireshark non vede più http.request.method. Forzando HTTP/1.1, ritornano i frame HTTP/1.1 classici.
+
+3). Avvio e test
+
+cd esperimentoW
+python3 server_https.py
+Server in ascolto su https://0.0.0.0:8443
+
+Da un altro dispositivo (stessa LAN) apri https://<IP-del-server>:8443
+
+Accetta il certificato autofirmato.
+
+Compila il form con user123 / password456 (Il server controlla che tu inserisca esattamente questi, per fare come se fosse un server vero con degli account creati precedentemente)
+
+6. Cattura del traffico con Wireshark
+
+Utilizzando il filtro tcp port 8443 (e volendo puoi anche specificare ip.addr e ip.src) per ridurre i numerosi pacchetti.
+
+Importa la chiave RSA per decifrare sul protocollo TLS con queste specifiche:
+
+
+IP: 0.0.0.0 (o indirizzo del tuo server)
+
+Porta: 8443
+
+Protocollo: http (NB non scrivere https!!)
+
+Key File: percorso di nuovakey_rsa.pem
+
+Cattura dall’inizio: ClientHello, ServerHello, etc.
+
+Solo così Wireshark può associare la chiave RSA alla sessione.
+
+7. Finalmente, se hai fatto tutto nel modo corretto, potrai vedere il POST login decifrato.
+Una volta completato handshake e login, applica Display filter:
+
+http.request.method == "POST"
+Wireshark mostrerà in chiaro:
+
+POST /login HTTP/1.1
+Host: <IP>:8443
+Content-Type: application/x-www-form-urlencoded
+username=user123&password=password456
